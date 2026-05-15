@@ -206,7 +206,7 @@ router.post("/Glogin", body('email').isEmail(), async (req, res) => {
             var transporter = nodemailer.createTransport({
                 service: 'gmail',
                 auth: {
-                    user: 'admin@itwalkin.comm',
+                    user: 'admin@itwalkin.com',
                     pass: 'hvzd mjnq yfxa eljs'
                 }
             });

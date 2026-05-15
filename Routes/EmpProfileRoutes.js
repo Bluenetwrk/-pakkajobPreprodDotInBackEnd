@@ -1,6 +1,7 @@
 const express = require("express");
 const app = express();
 const router = express.Router();
+const { OAuth2Client } = require("google-auth-library")
 const EmpProfileModel= require("../Schema/EmpProfileSchema")
 const ArchiveEmployee= require("../Schema/ArchivedEmployee")
 const NewEmpProfileRegistrationModel= require("../Schema/EmpNewRegistSchema")
@@ -18,7 +19,8 @@ const bodyParser = require('body-parser');
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+let pendingUsers = {};
 
 function verifyToken(req, res, next){
     if(req.headers['authorization']){
@@ -115,7 +117,7 @@ router.put("/deleteImage/:id", async (req, res) => {
 
 const accountSid = 'ACbf18fad2a3317eaaee849f5c91b0bcee';
 const authToken = '29a2b7a46349b15426eb0a58ff62df2c';
-const client = require('twilio')(accountSid, authToken);
+// const client = require('twilio')(accountSid, authToken);
 
 let OTP
 let PhoneNumber
@@ -217,139 +219,219 @@ router.post("/verifyOtp", async (req, res) => {
 //     }
 // })
 
+router.post("/verify-business-start", async (req, res) => {
+try {
+const { idToken } = req.body;
 
-router.post("/Glogin", async (req, res) => {
-    try {
-        let { userId, gtoken, email, name, isApproved, ipAddress, Gpicture } = req.body;
+// Verify ID Token
+const ticket = await client.verifyIdToken({
+idToken,
+audience: process.env.GOOGLE_CLIENT_ID
+});
+const payload = ticket.getPayload();
 
-        console.log('🔍 Verifying Google Business ownership for:', email);
+const email = payload.email;
+const name = payload.name;
 
-        // ✅ STEP 1: Verify Google Business Profile ownership using gtoken
-        let hasBusiness = false;
-        let businesses = [];
-        
-        try {
-            // Check Google Business Locations API
-            const businessRes = await axios.get('https://mybusiness.googleapis.com/v4/accounts/~owner/locations', {
-                headers: { 
-                    Authorization: `Bearer ${gtoken}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            businesses = businessRes.data.locations || [];
-            hasBusiness = businesses.length > 0;
-            console.log(`✅ Found ${businesses.length} business(es)`);
-            
-        } catch (businessError) {
-            console.log('ℹ️ No business found (normal for non-owners)');
-            // 403/404 = No business = Expected for non-owners
-            if (businessError.response?.status !== 403 && businessError.response?.status !== 404) {
-                console.error('Business API error:', businessError.response?.data);
-            }
-        }
+// Store the user temporarily
+const state = Math.random().toString(36).substring(7);
+pendingUsers[state] = { email, name };
 
-        // ✅ STEP 2: Check if user exists
-        let user = await EmpProfileModel.findOne({ email: email });
-        
-        if (user == null) {
-            // NEW USER - Only create if they have business OR approved
-            if (!hasBusiness && !isApproved) {
-                return res.json({
-                    success: false,
-                    message: '❌ No Google Business Profile found. Only business owners can register.',
-                    hasBusiness: false,
-                    businessCount: 0
-                });
-            }
-
-            // ✅ Create user (business owner or approved)
-            user = new EmpProfileModel({ 
-                email, 
-                name, 
-                userId,
-                isApproved: hasBusiness ? true : isApproved, // Auto-approve business owners
-                ipAddress,
-                Gpicture,
-                hasBusiness, // NEW FIELD
-                businessCount: businesses.length,
-                businesses: businesses.slice(0, 3) // Store first 3 businesses
-            });
-            
-            const result = await user.save();
-            console.log('✅ New business user created:', email);
-        } else {
-            // EXISTING USER - Update business status
-            user.hasBusiness = hasBusiness;
-            user.businessCount = businesses.length;
-            user.businesses = businesses.slice(0, 3);
-            await user.save();
-        }
-
-        // ✅ STEP 3: Generate JWT token
-        const token = jwt.sign(
-            { 
-                userId: user._id, 
-                email: user.email,
-                hasBusiness: user.hasBusiness 
-            }, 
-            process.env.JWT_SECRET, 
-            { expiresIn: '7d' }
-        );
-
-        res.json({
-            success: true,
-            message: hasBusiness ? '✅ Business verified!' : '✅ Login successful',
-            token,
-            user: {
-                id: user._id,
-                email: user.email,
-                name: user.name,
-                hasBusiness: user.hasBusiness,
-                businessCount: user.businessCount || 0
-            }
-        });
-
-    } catch (error) {
-        console.error('Glogin error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Login failed',
-            error: error.message
-        });
-    }
+// Create OAuth URL requesting "business.manage"
+const oauthUrl =
+"https://accounts.google.com/o/oauth2/v2/auth?" +
+new URLSearchParams({
+client_id: process.env.GOOGLE_CLIENT_ID,
+redirect_uri: process.env.REDIRECT_URI,
+response_type: "code",
+scope: "https://www.googleapis.com/auth/business.manage",
+access_type: "offline",
+prompt: "consent",
+state
 });
 
+return res.send({ oauthUrl });
 
-router.post("/NewEmployeeRegistration",  async(req, res)=>{
-    // console.log(req.body)
+} catch (err) {
+return res.status(400).send({ error: "Invalid Google login" });
+}
+});
 
-    try{
-        let User=await new EmpProfileModel(req.body)
-        let result=await User.save()
-        const response = await axios.post(
-            'https://login.microsoftonline.com/ae4ae520-4db7-4149-ad51-778e540d8bec/oauth2/v2.0/token',
-            new URLSearchParams({
-                grant_type: 'client_credentials',
-                client_id: '097b08ff-185e-4153-aedc-0e5814e0570c',
-                client_secret: '96u8Q~HFoESzMzfWqY5VhJWnY86sSkyrPiuNccbH',
-                scope: 'https://graph.microsoft.com/.default',
-            }),
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-            }
-        );
-        res.json(response.data);
-        // console.log(response.data.access_token)
-    } catch (error) {
-        res.json(error.code);
-        // console.log(error.code)
-    }
+// STEP 2: Google redirects here after business verification
+app.get("/verify-business-callback", async (req, res) => {
+try {
+const { code, state } = req.query;
+const user = pendingUsers[state];
+if (!user) return res.send("Session expired");
 
-
+// Exchange code → access token
+const tokenRes = await axios.post(
+"https://oauth2.googleapis.com/token",
+new URLSearchParams({
+code,
+client_id: process.env.GOOGLE_CLIENT_ID,
+client_secret: process.env.GOOGLE_CLIENT_SECRET,
+redirect_uri: process.env.REDIRECT_URI,
+grant_type: "authorization_code"
 })
+);
+
+const accessToken = tokenRes.data.access_token;
+
+// Call Google Business API
+const bizRes = await axios.get(
+"https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
+{ headers: { Authorization: `Bearer ${accessToken}` } }
+);
+
+const accounts = bizRes.data.accounts || [];
+
+if (accounts.length === 0) {
+return res.redirect("http://localhost:3000/?business=failed");
+}
+
+// SUCCESS — redirect to frontend with business info
+return res.redirect(
+`http://localhost:3000/dashboard?name=${user.name}&email=${user.email}`
+);
+
+} catch (err) {
+return res.redirect("http://localhost:3000/?business=failed");
+}
+});
+
+// router.post("/Glogin", async (req, res) => {
+//     try {
+//         let { userId, gtoken, email, name, isApproved, ipAddress, Gpicture } = req.body;
+
+//         console.log('🔍 Verifying Google Business ownership for:', email);
+
+//         // ✅ STEP 1: Verify Google Business Profile ownership using gtoken
+//         let hasBusiness = false;
+//         let businesses = [];
+        
+//         try {
+//             // Check Google Business Locations API
+//             const businessRes = await axios.get('https://mybusiness.googleapis.com/v4/accounts/~owner/locations', {
+//                 headers: { 
+//                     Authorization: `Bearer ${gtoken}`,
+//                     'Content-Type': 'application/json'
+//                 }
+//             });
+            
+//             businesses = businessRes.data.locations || [];
+//             hasBusiness = businesses.length > 0;
+//             console.log(`✅ Found ${businesses.length} business(es)`);
+            
+//         } catch (businessError) {
+//             console.log('ℹ️ No business found (normal for non-owners)');
+//             // 403/404 = No business = Expected for non-owners
+//             if (businessError.response?.status !== 403 && businessError.response?.status !== 404) {
+//                 console.error('Business API error:', businessError.response?.data);
+//             }
+//         }
+
+//         // ✅ STEP 2: Check if user exists
+//         let user = await EmpProfileModel.findOne({ email: email });
+        
+//         if (user == null) {
+//             // NEW USER - Only create if they have business OR approved
+//             if (!hasBusiness && !isApproved) {
+//                 return res.json({
+//                     success: false,
+//                     message: '❌ No Google Business Profile found. Only business owners can register.',
+//                     hasBusiness: false,
+//                     businessCount: 0
+//                 });
+//             }
+
+//             // ✅ Create user (business owner or approved)
+//             user = new EmpProfileModel({ 
+//                 email, 
+//                 name, 
+//                 userId,
+//                 isApproved: hasBusiness ? true : isApproved, // Auto-approve business owners
+//                 ipAddress,
+//                 Gpicture,
+//                 hasBusiness, // NEW FIELD
+//                 businessCount: businesses.length,
+//                 businesses: businesses.slice(0, 3) // Store first 3 businesses
+//             });
+            
+//             const result = await user.save();
+//             console.log('✅ New business user created:', email);
+//         } else {
+//             // EXISTING USER - Update business status
+//             user.hasBusiness = hasBusiness;
+//             user.businessCount = businesses.length;
+//             user.businesses = businesses.slice(0, 3);
+//             await user.save();
+//         }
+
+//         // ✅ STEP 3: Generate JWT token
+//         const token = jwt.sign(
+//             { 
+//                 userId: user._id, 
+//                 email: user.email,
+//                 hasBusiness: user.hasBusiness 
+//             }, 
+//             process.env.JWT_SECRET, 
+//             { expiresIn: '7d' }
+//         );
+
+//         res.json({
+//             success: true,
+//             message: hasBusiness ? '✅ Business verified!' : '✅ Login successful',
+//             token,
+//             user: {
+//                 id: user._id,
+//                 email: user.email,
+//                 name: user.name,
+//                 hasBusiness: user.hasBusiness,
+//                 businessCount: user.businessCount || 0
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error('Glogin error:', error);
+//         res.status(500).json({
+//             success: false,
+//             message: 'Login failed',
+//             error: error.message
+//         });
+//     }
+// });
+
+
+// router.post("/NewEmployeeRegistration",  async(req, res)=>{
+//     // console.log(req.body)
+
+//     try{
+//         let User=await new EmpProfileModel(req.body)
+//         let result=await User.save()
+//         const response = await axios.post(
+//             'https://login.microsoftonline.com/ae4ae520-4db7-4149-ad51-778e540d8bec/oauth2/v2.0/token',
+//             new URLSearchParams({
+//                 grant_type: 'client_credentials',
+//                 client_id: '097b08ff-185e-4153-aedc-0e5814e0570c',
+//                 client_secret: '96u8Q~HFoESzMzfWqY5VhJWnY86sSkyrPiuNccbH',
+//                 scope: 'https://graph.microsoft.com/.default',
+//             }),
+//             {
+//                 headers: {
+//                     'Content-Type': 'application/x-www-form-urlencoded',
+//                 },
+//             }
+//         );
+//         res.json(response.data);
+//         // console.log(response.data.access_token)
+//     } catch (error) {
+//         res.json(error.code);
+//         // console.log(error.code)
+//     }
+
+
+// })
 
 // router.post('/get-token', async (req, res) => {
 //     try {
